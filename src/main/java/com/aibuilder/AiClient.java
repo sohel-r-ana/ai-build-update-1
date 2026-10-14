@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
+import java.util.function.Consumer;
 
 /** Talks to the GPT (OpenAI), Gemini and Claude (Anthropic) HTTP APIs. Pure Java. */
 public final class AiClient {
@@ -25,7 +26,18 @@ public final class AiClient {
             .connectTimeout(Duration.ofSeconds(30))
             .build();
 
+    /** Set by BuildPipeline on the worker thread so retry notices reach the player. */
+    public static final ThreadLocal<Consumer<String>> NOTICE = new ThreadLocal<>();
+
     private AiClient() {}
+
+    private static long retryAfter(HttpResponse<String> resp, long fallback) {
+        try {
+            return Math.max(1, Math.min(90, Long.parseLong(resp.headers().firstValue("retry-after").orElse(""))));
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
 
     public static String complete(Config cfg, String provider, String system, List<Msg> msgs)
             throws IOException, InterruptedException {
@@ -99,7 +111,24 @@ public final class AiClient {
         }
 
         HttpRequest req = rb.POST(HttpRequest.BodyPublishers.ofString(body.toString())).build();
-        HttpResponse<String> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> resp;
+        for (int attempt = 0; ; attempt++) {
+            resp = HTTP.send(req, HttpResponse.BodyHandlers.ofString());
+            int sc = resp.statusCode();
+            String lower = resp.body() == null ? "" : resp.body().toLowerCase();
+            boolean dailyQuota = lower.contains("per day") || lower.contains("perday") || lower.contains("daily");
+            if ((sc == 429 || sc == 503 || sc == 529) && attempt < 4 && !dailyQuota) {
+                long wait = retryAfter(resp, Math.min(60, 15L * (attempt + 1)));
+                Consumer<String> n = NOTICE.get();
+                if (n != null) {
+                    n.accept("The AI service is busy or rate-limited (" + sc + "). Waiting " + wait
+                            + "s then retrying (" + (attempt + 1) + "/4)...");
+                }
+                Thread.sleep(wait * 1000L);
+                continue;
+            }
+            break;
+        }
         if (resp.statusCode() / 100 != 2) {
             String b = resp.body();
             if (b.length() > 400) b = b.substring(0, 400) + "...";

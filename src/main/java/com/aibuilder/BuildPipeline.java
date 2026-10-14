@@ -67,6 +67,16 @@ public final class BuildPipeline {
 
     public static BuildPlan generate(Config cfg, String provider, String request, Consumer<String> progress)
             throws Exception {
+        AiClient.NOTICE.set(progress);
+        try {
+            return generateInner(cfg, provider, request, progress);
+        } finally {
+            AiClient.NOTICE.remove();
+        }
+    }
+
+    private static BuildPlan generateInner(Config cfg, String provider, String request, Consumer<String> progress)
+            throws Exception {
         String sys = system(cfg);
         List<AiClient.Msg> h = new ArrayList<>();
 
